@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Lab output: interaction logs may hold (redacted) customer data
+*.jsonl

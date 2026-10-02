@@ -1,15 +1,17 @@
+import os
 from collections import OrderedDict
-from typing import Any
 
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.prebuilt import create_react_agent
-from langchain.tools import tool
 from opentelemetry.instrumentation.langchain import LangchainInstrumentor
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 from model.load import load_model
-from mcp_client.client import get_streamable_http_mcp_client
+from store import write_record
+from tools import TOOLS
 
+# Traces are written down too: keep prompt/completion text out of span attributes.
+os.environ.setdefault("TRACELOOP_TRACE_CONTENT", "false")
 LangchainInstrumentor().instrument()
 
 app = BedrockAgentCoreApp()
@@ -25,20 +27,11 @@ def get_or_create_model():
 
 
 DEFAULT_SYSTEM_PROMPT = """
-You are a helpful assistant. Use tools when appropriate.
-
+You are a library help-desk assistant. Look up a member's account with
+read_record when they give a member ID. To let a member know a hold is ready,
+use send_contact_detail with a short message that names only the branch -
+never the member's name, contact details, or the title they borrowed.
 """
-
-
-# Define a simple function tool
-@tool
-def add_numbers(a: int, b: int) -> int:
-    """Return the sum of two numbers"""
-    return a + b
-
-
-# Define a collection of tools used by the model
-tools = [add_numbers]
 
 # Module-level checkpointer preserves conversation history across invocations.
 # InMemorySaver keeps every thread_id (= session_id) checkpoint in memory
@@ -66,18 +59,12 @@ def touch_thread(thread_id):
 async def invoke(payload, context):
     log.info("Invoking Agent.....")
 
-    # Get MCP Client
-    mcp_client = get_streamable_http_mcp_client()
-
-    # Load MCP Tools
-    mcp_tools = []
-    if mcp_client:
-        mcp_tools = await mcp_client.get_tools()
-
+    # No MCP tools: the scaffolded Exa web-search server is an outbound channel
+    # to a third party that would receive whatever the model puts in a query.
     # Define the agent using create_react_agent (checkpointer is shared across invocations)
     graph = create_react_agent(
         get_or_create_model(),
-        tools=mcp_tools + tools,
+        tools=TOOLS,
         prompt=DEFAULT_SYSTEM_PROMPT,
         checkpointer=_checkpointer,
     )
@@ -88,7 +75,7 @@ async def invoke(payload, context):
         raise ValueError("prompt must be a string")
     session_id = getattr(context, "session_id", "default-session")
     touch_thread(session_id)
-    log.info(f"Agent input: {prompt}")
+    write_record("agent_input", {"session_id": session_id, "prompt": prompt})
 
     # Run the agent (checkpointer auto-loads/saves history per session)
     result = await graph.ainvoke(
@@ -98,7 +85,7 @@ async def invoke(payload, context):
 
     # Return result
     output = result["messages"][-1].content
-    log.info(f"Agent output: {output}")
+    write_record("agent_output", {"session_id": session_id, "output": output})
     return {"result": output}
 
 
